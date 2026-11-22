@@ -1,10 +1,12 @@
 """Smoke-test rollout: a two-joint MJCF arm and a cube, random policy, episodes to ./episodes.
 
-    python examples/reach_arm.py
+    python examples/reach_arm.py            # physics only
+    python examples/reach_arm.py --render   # plus 224x224 GPU camera images in every step
 
 Swap ``RandomPolicy`` for your VLA adapter (see docs/HANDOFF.md).
 """
 
+import sys
 import time
 
 import numpy as np
@@ -71,8 +73,23 @@ def make_task() -> TaskSpec:
     )
 
 
+def make_renderer(task: TaskSpec):
+    from fusion_vla.render import Camera, FusionRenderer
+
+    cams = {
+        "front": Camera(eye=(1.1, -1.0, 0.7), target=(0.25, 0.0, 0.1), fov_deg=50),
+        "wrist_view": Camera(eye=(0.0, -0.05, 0.9), target=(0.4, 0.1, 0.0), fov_deg=70),
+    }
+    r = FusionRenderer(cams, 224, 224, up_axis="z")  # MJCF scenes are z-up
+    r.set_color(task.tracked_objects[0], (0.85, 0.1, 0.1))  # the cube
+    return r
+
+
 if __name__ == "__main__":
-    env = FusionEnv(make_task(), num_envs=8, control_dt=1 / 30, physics_dt=1 / 240, max_episode_steps=60)
+    task = make_task()
+    renderer = make_renderer(task) if "--render" in sys.argv else None
+    env = FusionEnv(task, num_envs=8, control_dt=1 / 30, physics_dt=1 / 240, max_episode_steps=60,
+                    renderer=renderer)
     policy = RandomPolicy(env.task.action_low, env.task.action_high)
     rec = EpisodeRecorder("episodes")
     t0 = time.perf_counter()

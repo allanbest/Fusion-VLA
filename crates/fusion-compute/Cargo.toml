@@ -1,0 +1,13 @@
+[package]
+name = "fusion-compute"
+description = "Fusion L3: a thin compute layer over wgpu. Optional — nothing in the simulation core requires it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+fusion-math.workspace = true
+wgpu = "27"
+pollster = "1"
+bytemuck = { version = "1", features = ["derive"] }

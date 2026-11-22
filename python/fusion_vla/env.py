@@ -172,13 +172,18 @@ class FusionEnv:
         if ended.size:
             info["final_obs"] = {k: v[ended] for k, v in obs.items()}
             self._reset_ids(ended.tolist())
-            fresh = self.observe()
-            for k in obs:
+            # Re-observe; with a batch renderer, re-render only the envs that reset.
+            batch_render = self.renderer is not None and hasattr(self.renderer, "render_batch")
+            fresh = self.observe(render=not batch_render)
+            if batch_render:
+                for cam, img in self.renderer.render_batch(self.batch, env_indices=ended).items():
+                    obs[f"image/{cam}"][ended] = img
+            for k in fresh:
                 obs[k][ended] = fresh[k][ended]
         return obs, reward, terminated, truncated, info
 
-    def observe(self) -> Obs:
-        """Current observation for all envs (no stepping)."""
+    def observe(self, render: bool = True) -> Obs:
+        """Current observation for all envs (no stepping). ``render=False`` skips images."""
         n = self.num_envs
         obs: Obs = {}
         if self.joints:
@@ -188,8 +193,11 @@ class FusionEnv:
             obs["object_poses"] = scene_state(self.batch, self.tracked)
         if self.has_probes:
             obs["probes"] = np.asarray(self.batch.sample_observations(), np.float64).reshape(n, -1)
-        if self.renderer is not None:
-            images = self.renderer.render(scene_state(self.batch, self.all_objects))
+        if render and self.renderer is not None:
+            if hasattr(self.renderer, "render_batch"):
+                images = self.renderer.render_batch(self.batch)
+            else:
+                images = self.renderer.render(scene_state(self.batch, self.all_objects))
             for cam, img in images.items():
                 obs[f"image/{cam}"] = np.asarray(img)
         return obs

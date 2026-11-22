@@ -1,0 +1,15 @@
+[package]
+name = "fusion-viewport"
+description = "Fusion L6: debug viewport. Nothing in the simulation core may depend on this."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+fusion-math.workspace = true
+fusion-core.workspace = true
+wgpu = "27"
+winit = "0.30"
+pollster = "1"
+bytemuck = { version = "1", features = ["derive"] }

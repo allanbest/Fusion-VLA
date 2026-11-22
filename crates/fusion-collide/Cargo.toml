@@ -1,0 +1,11 @@
+[package]
+name = "fusion-collide"
+description = "Fusion L3: broad phase, narrow phase, contact manifolds."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+fusion-math.workspace = true
+fusion-core.workspace = true

@@ -1,8 +1,11 @@
-# Fusion-VLA: the Fusion Core solver, extracted standalone, plus Python
-# bindings for robot-learning / VLA training.
+# Fusion-VLA: Fusion without the editor and hub. Fusion Core, the Standard
+# engine, the platform layer, the GPU viewport/renderer and GPU compute, plus
+# Python bindings for robot-learning / VLA training.
 #
 #   crates/
-#     fusion-core-py    Python extension `fusion_vla._core` (pyo3)
+#     fusion-core-py    Python extension `fusion_vla._core` (pyo3): Fusion Core + GPU renderer
+#
+#   Fusion Core (f64 variational mechanics; std-only, zero third-party crates)
 #     phys-mechanics    L5 rigid + finite-element mechanics, one implicit solve
 #     phys-thermal      FEM heat conduction (dev-dependency of mechanics tests)
 #     phys-fluids       WCSPH fluids / two-way FSI
@@ -12,7 +15,24 @@
 #     core-runtime      L1 deterministic worker pool, profiling
 #     core-math         L0 f64 vectors, matrices, rotations, RNG
 #
-# Everything except fusion-core-py is std-only: zero third-party crates.
+#   Standard engine (f32 XPBD rigid bodies + MPM)
+#     fusion-solver     XPBD, PBF fluids, cloth, soft bodies, air
+#     fusion-mpm        material point method
+#     fusion-collide    broad phase, narrow phase, manifolds
+#     fusion-core       scene and state: World, Shape, Material, SoA store
+#     fusion-math       f32/f64 vectors, quaternions, matrices, AABBs
+#
+#   GPU (wgpu)
+#     fusion-viewport   renderer: offscreen camera images, shadows, SSAO
+#     fusion-compute    general GPU compute layer: buffers, kernels, command graph
+#     fusion-gpu        GPU fluid neighbour grid (Standard engine)
+#
+#   Platform
+#     fusion-sim        `Simulation`: the step loop over either engine
+#     fusion-project    the .fusion project format
+#     fusion-research   sweeps, run comparison, convergence, results store
+#     fusion-samples    training-data rollouts from Fusion Core
+#     fusion-script     behaviour scripts, in a deterministic subset of Python
 
 [workspace]
 resolver = "2"
@@ -25,6 +45,19 @@ members = [
     "crates/phys-mechanics",
     "crates/phys-thermal",
     "crates/phys-fluids",
+    "crates/fusion-math",
+    "crates/fusion-core",
+    "crates/fusion-collide",
+    "crates/fusion-solver",
+    "crates/fusion-mpm",
+    "crates/fusion-compute",
+    "crates/fusion-gpu",
+    "crates/fusion-viewport",
+    "crates/fusion-script",
+    "crates/fusion-sim",
+    "crates/fusion-project",
+    "crates/fusion-samples",
+    "crates/fusion-research",
     "crates/fusion-core-py",
 ]
 
@@ -44,6 +77,21 @@ core-world     = { path = "crates/core-world", version = "0.1.0" }
 phys-mechanics = { path = "crates/phys-mechanics", version = "0.1.0" }
 phys-thermal   = { path = "crates/phys-thermal", version = "0.1.0" }
 phys-fluids    = { path = "crates/phys-fluids", version = "0.1.0" }
+# Standard engine
+fusion-math    = { path = "crates/fusion-math", version = "0.1.0" }
+fusion-core    = { path = "crates/fusion-core", version = "0.1.0" }
+fusion-collide = { path = "crates/fusion-collide", version = "0.1.0" }
+fusion-solver  = { path = "crates/fusion-solver", version = "0.1.0" }
+fusion-mpm     = { path = "crates/fusion-mpm", version = "0.1.0" }
+fusion-compute = { path = "crates/fusion-compute", version = "0.1.0" }
+fusion-gpu     = { path = "crates/fusion-gpu", version = "0.1.0" }
+# Platform
+fusion-script   = { path = "crates/fusion-script", version = "0.1.0" }
+fusion-sim      = { path = "crates/fusion-sim", version = "0.1.0" }
+fusion-project  = { path = "crates/fusion-project", version = "0.1.0" }
+fusion-research = { path = "crates/fusion-research", version = "0.1.0" }
+# Renderer
+fusion-viewport = { path = "crates/fusion-viewport", version = "0.1.0" }
 
 [profile.release]
 opt-level = 3

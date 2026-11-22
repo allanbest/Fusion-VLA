@@ -11,6 +11,12 @@ publish = false
 name = "_core"
 crate-type = ["cdylib"]
 
+[features]
+# GPU camera rendering through the Fusion viewport (wgpu). On by default;
+# build with `--no-default-features` for a physics-only wheel.
+default = ["render"]
+render = ["dep:fusion-viewport", "dep:fusion-core", "dep:fusion-math", "dep:wgpu", "dep:pollster"]
+
 [dependencies]
 core-math.workspace = true
 core-runtime.workspace = true
@@ -18,3 +24,8 @@ core-space.workspace = true
 core-world.workspace = true
 phys-mechanics.workspace = true
 pyo3 = { version = "0.24", features = ["extension-module", "abi3-py39"] }
+fusion-viewport = { workspace = true, optional = true }
+fusion-core = { workspace = true, optional = true }
+fusion-math = { workspace = true, optional = true }
+wgpu = { version = "27", optional = true }
+pollster = { version = "1", optional = true }

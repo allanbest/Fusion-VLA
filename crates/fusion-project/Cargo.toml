@@ -1,0 +1,26 @@
+[package]
+name = "fusion-project"
+description = "Fusion L5: the .fusion project format — the tuple that makes a run reproducible."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dev-dependencies]
+fusion-solver.workspace = true
+
+[dependencies]
+fusion-math.workspace = true
+fusion-core.workspace = true
+fusion-solver.workspace = true
+fusion-sim.workspace = true
+fusion-script.workspace = true
+
+# The one place in Fusion that takes a dependency for something it could
+# write itself, and deliberately. Vectors and quaternions are cheap to own
+# (PLAN.md §30); a TOML parser is not, and unlike the math it is a
+# compatibility surface where a subtle bug corrupts saved work rather than
+# producing a visibly wrong picture. The core stack below L5 stays free of
+# it — `cargo tree -p fusion-sim` is still empty.
+serde = { version = "1", features = ["derive"] }
+toml = "1"

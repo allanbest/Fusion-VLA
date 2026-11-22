@@ -1,0 +1,12 @@
+[package]
+name = "fusion-solver"
+description = "Fusion L3: integrators and the XPBD constraint solver."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+fusion-math.workspace = true
+fusion-core.workspace = true
+fusion-collide.workspace = true

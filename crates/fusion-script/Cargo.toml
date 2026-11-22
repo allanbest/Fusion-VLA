@@ -1,0 +1,11 @@
+[package]
+name = "fusion-script"
+description = "Fusion L2: behaviour scripts on objects, in a deterministic subset of Python."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+fusion-math.workspace = true

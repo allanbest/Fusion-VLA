@@ -1,0 +1,17 @@
+[package]
+name = "fusion-gpu"
+description = "Fusion L3: GPU implementations of solver hot loops. Optional — nothing in the simulation core depends on it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+fusion-math.workspace = true
+fusion-compute.workspace = true
+bytemuck = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+fusion-collide.workspace = true
+fusion-core.workspace = true
+fusion-solver.workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "fusion-samples"
+description = "Headless, bounded-memory training rollout generation with Fusion Core."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+fusion-project.workspace = true
+fusion-sim.workspace = true
+core-world.workspace = true
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+
+[dev-dependencies]
+fusion-core.workspace = true
+fusion-math.workspace = true

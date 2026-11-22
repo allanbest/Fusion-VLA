@@ -36,7 +36,7 @@ class Policy(Protocol):
 
 @runtime_checkable
 class Renderer(Protocol):
-    """Produces camera images from Fusion scene state. Fusion Core has no renderer of its own."""
+    """Produces camera images from Fusion scene state. :class:`fusion_vla.render.FusionRenderer` is the built-in one."""
 
     def setup(self, geometry: List[Dict[str, Any]]) -> None:
         """Called once with :func:`fusion_vla.scene.scene_geometry` of the template world."""

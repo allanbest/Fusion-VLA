@@ -94,30 +94,76 @@ terminates and resets them. Count these failures; outside extreme scenes they
 should be zero. `info["solver_unconverged"]` is softer: the step finished but
 did not reach tolerance.
 
-## 3. Rendering
+## 3. Rendering (camera images)
 
-Fusion Core has no renderer. Build one from:
+### Built-in GPU renderer
 
-- `env.geometry`, one dict per object, in object-id order:
-  `{"id", "name", "kind": "fixed"|"rigid"|"solid", "shape"}`, where `shape` is
-  one of:
+The built-in renderer is `fusion_vla.render.FusionRenderer`. It draws through
+the Fusion viewport's offscreen wgpu pipeline, with shadows, SSAO and tone
+mapping. It runs headless, so no display is needed.
+
+```python
+from fusion_vla import Camera, FusionEnv, FusionRenderer
+
+cams = {
+    "front": Camera(eye=(1.1, -1.0, 0.7), target=(0.25, 0.0, 0.1), fov_deg=50),
+    "wrist_view": Camera(eye=(0.0, -0.05, 0.9), target=(0.4, 0.1, 0.0), fov_deg=70),
+}
+r = FusionRenderer(cams, 224, 224, up_axis="z")     # "y" for a bare World(), "z" for MJCF
+r.set_color(cube_id, (0.85, 0.1, 0.1))              # linear RGB in 0..1, same in every env
+env = FusionEnv(task, num_envs=N, renderer=r)
+env.reset()["image/front"]                           # (N, 224, 224, 3) uint8, top row first
+```
+
+- **Coordinates.** `Camera.eye` and `Camera.target` are in the scene's own
+  frame. The `up_axis` setting handles the conversion to the renderer's frame.
+- **Cameras are fixed.** A camera is fixed in the world. For a moving
+  (wrist-mounted) camera, read the link pose with
+  `env.world(i).object_position/orientation` and call
+  `r.native.render_world(world, eye, target, fov)` yourself.
+- **What gets drawn.** The renderer draws the collision geometry. Spheres and
+  boxes are drawn as is. Capsules are smooth-tessellated. Half-spaces become a
+  checkered floor, adjustable with `r.set_floor(extent, tile, color_a,
+  color_b)`. FEM solids are drawn from their deformed surface.
+- **Lighting.** `r.set_lighting(exposure=, ambient=, shadow_extent=,
+  ao_strength=, studio=)`.
+- **Single frames.** `r.render_world(world, "front")` returns one
+  `(H, W, 3)` frame. `fusion_vla.render.save_png(path, img)` writes a PNG.
+- **Cost.** About 2 ms per frame per camera at 224×224 on an M4 Pro. Every
+  frame is a separate GPU submit and readback, so rendering dominates the step
+  time.
+- **No GPU.** `fusion_vla.gpu_info()` returns `None`, and constructing a
+  `FusionRenderer` raises `RuntimeError`. Physics still works.
+- **Not yet available.** Depth, segmentation, textures, and visual meshes from
+  URDF/MJCF.
+
+### Bringing your own renderer
+
+To use another renderer (Isaac, Blender, pyrender, MuJoCo's renderer with your
+visual meshes, and so on), implement the `Renderer` protocol:
+
+- `setup(geometry)` receives `env.geometry`, one dict per object in
+  object-id order: `{"id", "name", "kind": "fixed"|"rigid"|"solid",
+  "shape"}`. `shape` is one of:
   - `{"type": "sphere", "radius"}`
   - `{"type": "box", "half_extents": (hx, hy, hz)}`
   - `{"type": "capsule", "radius", "half_length"}`, with its axis along local **+y**
   - `{"type": "halfspace", "normal", "offset"}`, the ground or a wall: points with `normal·p ≤ offset`
   - `None` for FEM solids. Draw those from `env.world(i).solid_node_positions(id)`.
-- `render(poses)`, where `poses[n, k]` is object `k`'s pose in env `n`, in the
-  same order as `geometry`.
+- `render(poses)` receives `poses[n, k]`, the pose of object `k` in env `n`,
+  in the same order as `geometry`.
 
-Rules for the renderer:
+If a renderer object also has a `render_batch(batch, env_indices=None)`
+method, `FusionEnv` calls that instead, passing it the raw `WorldBatch`.
+
+Rules for any renderer:
 
 - Quaternions are **(x, y, z, w)**. Units are SI (m, kg, s, rad).
 - The up axis depends on the scene. A bare `core.World()` is **y-up** (gravity
   `(0, -9.81, 0)`). An MJCF file brings its own `<option gravity>`, usually
-  z-up. Place cameras to suit.
-- Shapes come from collision geometry, not visual meshes. For realistic images,
-  map `name` (the MJCF/URDF link or geom name) to your own visual assets and
-  use Fusion only for the poses.
+  z-up.
+- For realistic images, map `name` (the MJCF/URDF link or geom name) to your
+  own visual assets, and use Fusion only for the poses.
 
 ## 4. The raw solver (`fusion_vla.core`)
 
@@ -148,6 +194,9 @@ the env doesn't fit:
   `object_poses`, `sample_observations`, `world_snapshot`, `reports`.
 - `DomainRandomizer(seed, mass_scale, friction_scale, stiffness_scale,
   damping_scale, gravity_jitter)`.
+- `Renderer(width, height, up_axis)` and `gpu_info()`: the native half of
+  `FusionRenderer`, covering `render_world`, `render_batch`, `set_color`,
+  `set_floor` and `set_lighting`.
 - `Settings(...)`: integrator (`"tr_bdf2"` by default), tolerance, islands,
   sleeping, substepping and more. The defaults are reasonable.
 
@@ -157,9 +206,12 @@ the env doesn't fit:
 
 - **Deterministic.** The same seed and actions give bit-identical results for
   any `threads` value. `test_determinism_across_thread_counts` checks this.
-- **CPU only.** Throughput scales with cores through `threads`. The
-  reach-arm example runs about 4.5k control steps per second (8 envs, 8
-  substeps, on an M-series laptop). Expect much less with rich contact.
+- **Physics on the CPU, rendering on the GPU.** Fusion Core throughput
+  scales with cores through `threads`. The reach-arm example runs about 1.2 ms
+  per control step for 8 envs (8 substeps each) on an M4 Pro, physics only.
+  Expect much more with rich contact. No GPU solver exists for Fusion Core.
+  The `fusion-compute` and `fusion-gpu` crates (GPU compute layer, and a fluid
+  neighbour grid for the Standard engine) are in the repo but not used here.
 - **Primitive collision shapes.** URDF/MJCF meshes are approximated; see the
   README.
 - **Not exposed yet** (in Rust, but not in the bindings): thermal and fluid

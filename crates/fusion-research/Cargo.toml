@@ -1,0 +1,19 @@
+[package]
+name = "fusion-research"
+description = "Fusion L5: the research workflow — sweeps, comparison, convergence, conservation, and a results store."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "study"
+path = "src/bin/study.rs"
+
+[dependencies]
+fusion-math.workspace = true
+fusion-core.workspace = true
+fusion-sim.workspace = true
+fusion-project.workspace = true
+serde = { version = "1", features = ["derive"] }
+toml = "1"

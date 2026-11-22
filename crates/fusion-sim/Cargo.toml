@@ -1,0 +1,22 @@
+[package]
+name = "fusion-sim"
+description = "Fusion L4/L5: the step loop and mode profiles. Headless by construction."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+fusion-math.workspace = true
+fusion-core.workspace = true
+fusion-script.workspace = true
+fusion-collide.workspace = true
+fusion-solver.workspace = true
+fusion-mpm.workspace = true
+serde = { version = "1", features = ["derive"] }
+
+core-math.workspace = true
+core-runtime.workspace = true
+core-space.workspace = true
+core-world.workspace = true
+phys-mechanics.workspace = true

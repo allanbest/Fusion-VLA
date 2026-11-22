@@ -1,0 +1,58 @@
+# Input lab: two equal thrusters, different masses, the same recorded controls.
+# Open Controls, Replay take, or Record new take. WASD moves in X/Z; Q/E moves down/up.
+[fusion]
+format = 4
+version = "0.1.0"
+
+[world]
+gravity = [0.0, 0.0, 0.0]
+linear_damping = 0.0
+angular_damping = 0.0
+seed = 42
+
+[metadata]
+note = "Input lab: equal 10 N controllers on 2 kg and 4 kg bodies. With no gravity or damping, full input gives 5 m/s² and 2.5 m/s². Both probes record each solver step. Positive and negative thrust in the saved take accelerate and brake."
+
+[[material]]
+name = "Solid"
+density = 1000.0
+friction = 0.5
+restitution = 0.2
+
+[[object]]
+name = "Light body · 2 kg"
+material = "Solid"
+shape = { kind = "sphere", radius = 0.35 }
+position = [-1.0, 1.0, 0.0]
+mass = 2.0
+[object.components]
+probe = true
+[object.components.controller]
+actions = ["move_x", "move_y", "move_z"]
+force = 10.0
+
+[[object]]
+name = "Heavy body · 4 kg"
+material = "Solid"
+shape = { kind = "sphere", radius = 0.35 }
+position = [-1.0, 1.0, 2.0]
+mass = 4.0
+[object.components]
+probe = true
+[object.components.controller]
+actions = ["move_x", "move_y", "move_z"]
+force = 10.0
+
+[[input]]
+name = "move_x"
+negative = "a"
+positive = "d"
+events = [{ step = 0, value = 1.0 }, { step = 240, value = -1.0 }, { step = 480, value = 0.0 }]
+[[input]]
+name = "move_y"
+negative = "q"
+positive = "e"
+[[input]]
+name = "move_z"
+negative = "w"
+positive = "s"

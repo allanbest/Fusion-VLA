@@ -2371,7 +2371,7 @@ impl PyCoreDomainRandomizer {
 
 #[pyclass(module = "fusion_vla.core", name = "WorldBatch")]
 pub struct PyCoreWorldBatch {
-    inner: WorldBatch,
+    pub(crate) inner: WorldBatch,
     pool: Pool,
 }
 
