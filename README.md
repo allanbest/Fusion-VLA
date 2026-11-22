@@ -116,21 +116,31 @@ pytest python/tests                      # bindings, env, renderer (GPU tests sk
 python examples/reach_arm.py --render    # smoke rollout with two cameras; writes ./episodes/*.npz
 ```
 
-## Performance (M4 Pro, 8 envs)
+## Performance (Apple M4 Pro, reach-arm scene, 224×224 RGB)
 
-| | per control step (8 physics substeps) |
+| | |
 |---|---|
-| physics only (reach arm) | about 1.2 ms |
-| one 224×224 camera frame | about 2.1 ms per env per camera |
+| physics, 8 envs, one control step (8 substeps) | about 1.2 ms |
+| one camera frame, rendered alone (the old path) | about 1.6–2.0 ms |
+| one camera frame, batched (`render_batch`, the default) | about 0.26–0.45 ms, or 2,500–3,900 frames/s |
+| `env.step`, 64 envs × 2 cameras, physics + 128 images | about 43 ms, or about 1,500 env-steps/s |
 
-Each frame is rendered and read back on its own, so rendering costs far more
-than the physics. Batching frames into one GPU submission (a texture atlas)
-is the obvious next speedup.
+The ranges come from a busy machine (best of several runs). Batched
+rendering works like this:
+
+- Scene geometry is built on every CPU core.
+- Frames are split across `workers` renderer instances, each with its own GPU
+  queue on its own thread.
+- Every frame is queued back to back, and the CPU waits for the GPU once per
+  step.
+
+`FusionRenderer(..., workers=2, shadow_resolution=1024)` are the defaults.
+On a discrete GPU, try more workers. A lower shadow resolution is faster.
 
 ## What runs on the GPU
 
 - **Rendering** runs on the GPU through `fusion-viewport` (wgpu): every camera
-  image.
+  image, batched across envs and cameras, and spread over several GPU queues.
 - **Fusion Core physics runs on the CPU.** Envs are parallelized across a
   deterministic thread pool, and results are bit-identical whatever the thread
   count. No GPU solver for Fusion Core exists yet.
@@ -164,5 +174,7 @@ Added since:
 - `World.object_ids`, `object_name`, `object_kind` and `object_shape`
 - `WorldBatch.object_poses`
 - `render.rs`: `Renderer` and `gpu_info`
+- In `fusion-viewport`: `Renderer::read_back_many` (many frames, one sync) and
+  `Renderer::set_shadow_resolution`
 
 License: MIT OR Apache-2.0, as declared by the source crates.

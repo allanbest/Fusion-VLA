@@ -127,6 +127,8 @@ pub struct Renderer {
     ao_view: wgpu::TextureView,
     ao_blur_view: wgpu::TextureView,
     shadow_view: wgpu::TextureView,
+    /// Edge of the square shadow map, in texels.
+    shadow_resolution: u32,
 
     depth_pipeline: wgpu::RenderPipeline,
     shadow_pipeline: wgpu::RenderPipeline,
@@ -595,6 +597,7 @@ impl Renderer {
             ao_view,
             ao_blur_view,
             shadow_view,
+            shadow_resolution: SHADOW_RESOLUTION,
             depth_pipeline,
             shadow_pipeline,
             triangle_pipeline,
@@ -631,6 +634,24 @@ impl Renderer {
         };
         renderer.rebuild_bind_groups();
         renderer
+    }
+
+    /// Change the shadow map's resolution (default 2048). The shadow pass
+    /// draws the whole scene into this map every frame, so for small images,
+    /// such as 224x224 training frames, 512-1024 cuts GPU time per frame
+    /// noticeably with little visible change.
+    pub fn set_shadow_resolution(&mut self, texels: u32) {
+        let texels = texels.clamp(64, 8192);
+        if texels == self.shadow_resolution {
+            return;
+        }
+        self.shadow_view = create_texture(&self.device, texels, texels, DEPTH_FORMAT, "shadow map");
+        self.shadow_resolution = texels;
+        self.rebuild_bind_groups();
+    }
+
+    pub fn shadow_resolution(&self) -> u32 {
+        self.shadow_resolution
     }
 
     fn rebuild_bind_groups(&mut self) {
@@ -915,7 +936,7 @@ impl Renderer {
                     LIGHT_DIRECTION[0],
                     LIGHT_DIRECTION[1],
                     LIGHT_DIRECTION[2],
-                    1.0 / SHADOW_RESOLUTION as f32,
+                    1.0 / self.shadow_resolution as f32,
                 ],
                 render: [
                     width as f32,
@@ -1273,6 +1294,98 @@ impl Renderer {
             height,
             pixels,
         })
+    }
+
+    /// Render many frames and read them all back with **one** CPU-GPU sync.
+    ///
+    /// `read_back` waits for the GPU after every frame, so a batch of N frames
+    /// pays N round trips and leaves the GPU idle while the CPU builds the next
+    /// frame. Here every frame is submitted back to back, each followed by a copy
+    /// of the finished target into its own slice of one shared readback buffer.
+    /// Queue order keeps the frames apart: frame i's uniforms, vertices and copy
+    /// are all scheduled before frame i + 1 overwrites them. The CPU waits once,
+    /// at the end.
+    ///
+    /// Frames come back as tightly packed RGBA8, frame after frame, in the order
+    /// given. Offscreen renderers only.
+    pub fn read_back_many(&mut self, frames: &[(&OrbitCamera, &Geometry)]) -> Option<Vec<u8>> {
+        let Target::Offscreen {
+            texture,
+            width,
+            height,
+            ..
+        } = &self.target
+        else {
+            return None;
+        };
+        let (width, height) = (*width, *height);
+        let texture = texture.clone();
+        if frames.is_empty() {
+            return Some(Vec::new());
+        }
+        let unpadded = width * 4;
+        let padded = unpadded.div_ceil(256) * 256;
+        let frame_bytes = (padded * height) as u64;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("batched readback"),
+            size: frame_bytes * frames.len() as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        for (i, (camera, geometry)) in frames.iter().enumerate() {
+            self.render_with(camera, geometry, |_| {});
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("batched readback copy"),
+                });
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: frame_bytes * i as u64,
+                        bytes_per_row: Some(padded),
+                        rows_per_image: Some(height),
+                    },
+                },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            self.queue.submit(Some(encoder.finish()));
+        }
+
+        let slice = buffer.slice(..);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = sender.send(r);
+        });
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+        receiver.recv().ok()?.ok()?;
+
+        let data = slice.get_mapped_range();
+        let mut pixels = Vec::with_capacity((unpadded * height) as usize * frames.len());
+        for f in 0..frames.len() {
+            let base = f * frame_bytes as usize;
+            for row in 0..height {
+                let start = base + (row * padded) as usize;
+                pixels.extend_from_slice(&data[start..start + unpadded as usize]);
+            }
+        }
+        drop(data);
+        buffer.unmap();
+        Some(pixels)
     }
 }
 

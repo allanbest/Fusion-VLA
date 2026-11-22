@@ -129,9 +129,12 @@ env.reset()["image/front"]                           # (N, 224, 224, 3) uint8, t
   ao_strength=, studio=)`.
 - **Single frames.** `r.render_world(world, "front")` returns one
   `(H, W, 3)` frame. `fusion_vla.render.save_png(path, img)` writes a PNG.
-- **Cost.** About 2 ms per frame per camera at 224×224 on an M4 Pro. Every
-  frame is a separate GPU submit and readback, so rendering dominates the step
-  time.
+- **Cost.** About 0.3–0.45 ms per 224×224 frame on an M4 Pro (2,500–3,900
+  frames/s). Each `env.step` renders every camera of every env as one GPU
+  batch with a single CPU–GPU sync, so 64 envs × 2 cameras take about 40 ms.
+  To tune, pass `FusionRenderer(..., workers=2, shadow_resolution=1024)`:
+  more workers on a discrete GPU, a lower shadow resolution for speed. Output
+  is bit-identical for any `workers` value.
 - **No GPU.** `fusion_vla.gpu_info()` returns `None`, and constructing a
   `FusionRenderer` raises `RuntimeError`. Physics still works.
 - **Not yet available.** Depth, segmentation, textures, and visual meshes from
@@ -196,7 +199,8 @@ the env doesn't fit:
   damping_scale, gravity_jitter)`.
 - `Renderer(width, height, up_axis)` and `gpu_info()`: the native half of
   `FusionRenderer`, covering `render_world`, `render_batch`, `set_color`,
-  `set_floor` and `set_lighting`.
+  `render_cameras` (every camera of every env in one batch), `set_floor`,
+  `set_lighting`, `workers`, `shadow_resolution` and `threads`.
 - `Settings(...)`: integrator (`"tr_bdf2"` by default), tolerance, islands,
   sleeping, substepping and more. The defaults are reasonable.
 

@@ -97,13 +97,10 @@ impl Frame {
     }
 }
 
-#[pyclass(module = "fusion_vla.core", name = "Renderer", unsendable)]
-pub struct PyRenderer {
-    renderer: Renderer,
-    width: u32,
-    height: u32,
+/// Everything needed to turn a world into triangles, with no GPU state, so
+/// geometry for many envs can be built on several threads at once.
+struct Style {
     frame: Frame,
-    up_axis: char,
     capsule: CapsuleMesh,
     colors: HashMap<u32, [f32; 3]>,
     floor_colors: ([f32; 3], [f32; 3]),
@@ -111,7 +108,19 @@ pub struct PyRenderer {
     floor_tile: f32,
 }
 
-impl PyRenderer {
+#[pyclass(module = "fusion_vla.core", name = "Renderer", unsendable)]
+pub struct PyRenderer {
+    /// `renderers[0]` serves single frames; batches are split across all of
+    /// them, each on its own thread with its own GPU device and queue.
+    renderers: Vec<Renderer>,
+    width: u32,
+    height: u32,
+    up_axis: char,
+    style: Style,
+    threads: usize,
+}
+
+impl Style {
     fn color_for(&self, index: u32, dynamic: bool) -> [f32; 3] {
         self.colors
             .get(&index)
@@ -189,11 +198,38 @@ impl PyRenderer {
         }
     }
 
+    fn geometry(&self, world: &World) -> Geometry {
+        let mut g = Geometry::new();
+        self.draw_world(world, &mut g);
+        g
+    }
+}
+
+/// Builds one `Geometry` per world, spread over up to `threads` threads.
+fn build_geometries(style: &Style, worlds: &[&World], threads: usize) -> Vec<Geometry> {
+    let threads = threads.clamp(1, worlds.len().max(1));
+    if threads == 1 {
+        return worlds.iter().map(|w| style.geometry(w)).collect();
+    }
+    let chunk = worlds.len().div_ceil(threads);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = worlds
+            .chunks(chunk)
+            .map(|part| scope.spawn(move || part.iter().map(|w| style.geometry(w)).collect::<Vec<_>>()))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("geometry thread panicked"))
+            .collect()
+    })
+}
+
+impl PyRenderer {
     fn camera(&self, eye: Vec3Arg, target: Vec3Arg, fov_deg: f64) -> PyResult<OrbitCamera> {
         if !(fov_deg.is_finite() && fov_deg > 1.0 && fov_deg < 179.0) {
             return Err(PyValueError::new_err("fov_deg must be in (1, 179)"));
         }
-        let (e, t) = (self.frame.point(arg(eye)?), self.frame.point(arg(target)?));
+        let (e, t) = (self.style.frame.point(arg(eye)?), self.style.frame.point(arg(target)?));
         if (e - t).length() < 1e-6 {
             return Err(PyValueError::new_err("camera eye and target must differ"));
         }
@@ -208,18 +244,58 @@ impl PyRenderer {
     }
 
     fn render_rgb(&mut self, world: &World, cam: &OrbitCamera, out: &mut Vec<u8>) -> PyResult<()> {
-        let mut g = Geometry::new();
-        self.draw_world(world, &mut g);
-        let image = self
-            .renderer
+        let g = self.style.geometry(world);
+        let image = self.renderers[0]
             .read_back(cam, &g)
             .ok_or_else(|| PyRuntimeError::new_err("offscreen readback failed"))?;
-        out.reserve((self.width * self.height * 3) as usize);
-        for px in image.pixels.chunks_exact(4) {
-            out.extend_from_slice(&px[..3]);
-        }
+        rgba_to_rgb(&image.pixels, out);
         Ok(())
     }
+
+    /// Every (camera, world) frame in one GPU batch, camera-major.
+    fn render_many(&mut self, worlds: &[&World], cams: &[OrbitCamera]) -> PyResult<Vec<u8>> {
+        let geoms = build_geometries(&self.style, worlds, self.threads);
+        let frames: Vec<(&OrbitCamera, &Geometry)> =
+            cams.iter().flat_map(|c| geoms.iter().map(move |g| (c, g))).collect();
+        let workers = self.renderers.len().min(frames.len()).max(1);
+        let chunk = frames.len().div_ceil(workers).max(1);
+        let parts: Vec<Option<Vec<u8>>> = if workers == 1 {
+            vec![self.renderers[0].read_back_many(&frames)]
+        } else {
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = self
+                    .renderers
+                    .iter_mut()
+                    .zip(frames.chunks(chunk))
+                    .map(|(r, part)| scope.spawn(move || r.read_back_many(part)))
+                    .collect();
+                handles.into_iter().map(|h| h.join().expect("render thread panicked")).collect()
+            })
+        };
+        let mut rgba = Vec::new();
+        for p in parts {
+            rgba.extend(p.ok_or_else(|| PyRuntimeError::new_err("offscreen readback failed"))?);
+        }
+        let mut out = Vec::with_capacity(rgba.len() / 4 * 3);
+        rgba_to_rgb(&rgba, &mut out);
+        Ok(out)
+    }
+}
+
+fn rgba_to_rgb(rgba: &[u8], out: &mut Vec<u8>) {
+    out.reserve(rgba.len() / 4 * 3);
+    for px in rgba.chunks_exact(4) {
+        out.extend_from_slice(&px[..3]);
+    }
+}
+
+fn new_offscreen(width: u32, height: u32) -> PyResult<Renderer> {
+    Renderer::try_offscreen(width, height).ok_or_else(|| {
+        PyRuntimeError::new_err(
+            "no usable GPU adapter for offscreen rendering (wgpu found none: \
+             on Linux install Vulkan drivers, e.g. the NVIDIA driver or mesa-vulkan-drivers)",
+        )
+    })
 }
 
 #[pymethods]
@@ -239,24 +315,24 @@ impl PyRenderer {
             "z" | "Z" => (Quat::from_axis_angle(vec3(1.0, 0.0, 0.0), -0.5 * PI), 'z'),
             _ => return Err(PyValueError::new_err("up_axis must be 'y' or 'z'")),
         };
-        let mut renderer = Renderer::try_offscreen(width, height).ok_or_else(|| {
-            PyRuntimeError::new_err(
-                "no usable GPU adapter for offscreen rendering (wgpu found none: \
-                 on Linux install Vulkan drivers, e.g. the NVIDIA driver or mesa-vulkan-drivers)",
-            )
-        })?;
+        let mut renderer = new_offscreen(width, height)?;
         renderer.settings.shadow_extent = 4.0;
+        renderer.set_shadow_resolution(1024);
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
         Ok(Self {
-            renderer,
+            renderers: vec![renderer],
             width,
             height,
-            frame: Frame { to_render },
             up_axis: up,
-            capsule: CapsuleMesh::new(24, 6),
-            colors: HashMap::new(),
-            floor_colors: ([0.42, 0.43, 0.45], [0.30, 0.31, 0.33]),
-            floor_extent: 4.0,
-            floor_tile: 0.25,
+            style: Style {
+                frame: Frame { to_render },
+                capsule: CapsuleMesh::new(24, 6),
+                colors: HashMap::new(),
+                floor_colors: ([0.42, 0.43, 0.45], [0.30, 0.31, 0.33]),
+                floor_extent: 4.0,
+                floor_tile: 0.25,
+            },
+            threads,
         })
     }
 
@@ -280,7 +356,7 @@ impl PyRenderer {
                 return Err(PyValueError::new_err("colour components must be in 0..1"));
             }
         }
-        self.colors.insert(object.inner.0, [rgb.0, rgb.1, rgb.2]);
+        self.style.colors.insert(object.inner.0, [rgb.0, rgb.1, rgb.2]);
         Ok(())
     }
 
@@ -297,9 +373,9 @@ impl PyRenderer {
         if !(extent > 0.0 && tile > 0.0 && extent / tile <= 200.0) {
             return Err(PyValueError::new_err("need extent > 0, tile > 0 and extent/tile <= 200"));
         }
-        self.floor_extent = extent;
-        self.floor_tile = tile;
-        self.floor_colors = ([color_a.0, color_a.1, color_a.2], [color_b.0, color_b.1, color_b.2]);
+        self.style.floor_extent = extent;
+        self.style.floor_tile = tile;
+        self.style.floor_colors = ([color_a.0, color_a.1, color_a.2], [color_b.0, color_b.1, color_b.2]);
         Ok(())
     }
 
@@ -313,21 +389,23 @@ impl PyRenderer {
         ao_strength: Option<f32>,
         studio: Option<bool>,
     ) {
-        let s = &mut self.renderer.settings;
-        if let Some(x) = exposure {
-            s.exposure = x;
-        }
-        if let Some(x) = ambient {
-            s.ambient = x;
-        }
-        if let Some(x) = shadow_extent {
-            s.shadow_extent = x;
-        }
-        if let Some(x) = ao_strength {
-            s.ao_strength = x;
-        }
-        if let Some(x) = studio {
-            s.studio = x;
+        for r in &mut self.renderers {
+            let s = &mut r.settings;
+            if let Some(x) = exposure {
+                s.exposure = x;
+            }
+            if let Some(x) = ambient {
+                s.ambient = x;
+            }
+            if let Some(x) = shadow_extent {
+                s.shadow_extent = x;
+            }
+            if let Some(x) = ao_strength {
+                s.ao_strength = x;
+            }
+            if let Some(x) = studio {
+                s.studio = x;
+            }
         }
     }
 
@@ -348,8 +426,8 @@ impl PyRenderer {
         Ok(PyBytes::new(py, &out))
     }
 
-    /// One RGB frame per env of `batch`: `len(batch) * height * width * 3`
-    /// bytes. `env_indices` limits the frames to those envs, in that order.
+    /// One RGB frame per env of `batch`: `len(env_indices) * height * width * 3`
+    /// bytes. All frames are rendered in one GPU batch with a single sync.
     #[pyo3(signature = (batch, eye, target, fov_deg = 60.0, env_indices = None))]
     fn render_batch<'py>(
         &mut self,
@@ -360,17 +438,85 @@ impl PyRenderer {
         fov_deg: f64,
         env_indices: Option<Vec<usize>>,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let cam = self.camera(eye, target, fov_deg)?;
+        self.render_cameras(py, batch, vec![(eye, target, fov_deg)], env_indices)
+    }
+
+    /// Every camera for every env (or `env_indices`) in **one** GPU batch:
+    /// `len(cameras) * len(envs) * height * width * 3` bytes, camera-major.
+    /// `cameras` is a list of `(eye, target, fov_deg)`. Scene geometry is
+    /// built on up to `threads` CPU threads in parallel and shared by all
+    /// cameras. The CPU waits for the GPU once per call.
+    #[pyo3(signature = (batch, cameras, env_indices = None))]
+    fn render_cameras<'py>(
+        &mut self,
+        py: Python<'py>,
+        batch: &PyCoreWorldBatch,
+        cameras: Vec<(Vec3Arg, Vec3Arg, f64)>,
+        env_indices: Option<Vec<usize>>,
+    ) -> PyResult<Bound<'py, PyBytes>> {
+        let cams = cameras
+            .iter()
+            .map(|&(e, t, f)| self.camera(e, t, f))
+            .collect::<PyResult<Vec<_>>>()?;
         let n = batch.inner.len();
         let ids = env_indices.unwrap_or_else(|| (0..n).collect());
-        let mut out = Vec::with_capacity(ids.len() * (self.width * self.height * 3) as usize);
-        for i in ids {
-            if i >= n {
-                return Err(PyIndexError::new_err(format!("env index {i} out of range ({n})")));
-            }
-            self.render_rgb(batch.inner.world(i), &cam, &mut out)?;
+        if let Some(&bad) = ids.iter().find(|&&i| i >= n) {
+            return Err(PyIndexError::new_err(format!("env index {bad} out of range ({n})")));
         }
+        let worlds: Vec<&World> = ids.iter().map(|&i| batch.inner.world(i)).collect();
+        let out = self.render_many(&worlds, &cams)?;
         Ok(PyBytes::new(py, &out))
+    }
+
+    /// Renderer instances that split each batch between them, each on its own
+    /// thread with its own GPU device and queue (default 1). More workers
+    /// spread the per-frame CPU encoding over more cores and keep more work
+    /// queued on the GPU. New workers copy the first one's lighting settings.
+    #[getter]
+    fn workers(&self) -> usize {
+        self.renderers.len()
+    }
+    #[setter]
+    fn set_workers(&mut self, n: usize) -> PyResult<()> {
+        if !(1..=64).contains(&n) {
+            return Err(PyValueError::new_err("workers must be in 1..=64"));
+        }
+        self.renderers.truncate(n);
+        while self.renderers.len() < n {
+            let mut r = new_offscreen(self.width, self.height)?;
+            r.settings = self.renderers[0].settings.clone();
+            r.set_shadow_resolution(self.renderers[0].shadow_resolution());
+            self.renderers.push(r);
+        }
+        Ok(())
+    }
+
+    /// Shadow map edge in texels (default 1024 here; the viewport's own
+    /// default is 2048). Lower is faster on the GPU, higher gives crisper
+    /// shadows.
+    #[getter]
+    fn shadow_resolution(&self) -> u32 {
+        self.renderers[0].shadow_resolution()
+    }
+    #[setter]
+    fn set_shadow_resolution(&mut self, texels: u32) {
+        for r in &mut self.renderers {
+            r.set_shadow_resolution(texels);
+        }
+    }
+
+    /// CPU threads used to build scene geometry (default: all cores).
+    #[getter]
+    fn threads(&self) -> usize {
+        self.threads
+    }
+    #[setter]
+    fn set_threads(&mut self, n: usize) -> PyResult<()> {
+        if n == 0 {
+            return Err(PyValueError::new_err("threads must be >= 1"));
+        }
+        self.threads = n;
+        Ok(())
     }
 }
 

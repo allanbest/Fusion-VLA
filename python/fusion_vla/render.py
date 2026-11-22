@@ -56,8 +56,17 @@ class FusionRenderer:
     prefers. ``render_batch`` reads the worlds directly, so FEM solids are
     drawn too.
 
-    One GPU device and render target are shared by all cameras. Frames render
-    sequentially, roughly 1–3 ms each at 224×224 on a laptop GPU.
+    Each ``render_batch`` call renders every camera of every env as one batch:
+
+    * scene geometry for all envs is built on all CPU cores in parallel;
+    * frames are split across ``workers`` renderer instances (each its own GPU
+      device and queue, on its own thread), so frame encoding uses several
+      cores and the GPU always has work queued;
+    * each worker queues its frames back to back and the CPU waits once.
+
+    Tuning: ``workers`` (default 2) — try 2–8 on a discrete GPU;
+    ``shadow_resolution`` (default 1024 texels) — 512 is faster, 2048 crisper.
+    Output is bit-identical for any ``workers`` value.
     """
 
     def __init__(
@@ -67,6 +76,8 @@ class FusionRenderer:
         height: int = 224,
         *,
         up_axis: str = "y",
+        workers: int = 2,
+        shadow_resolution: int = 1024,
     ) -> None:
         if not HAS_RENDER:
             raise RuntimeError("fusion_vla was built without the 'render' feature")
@@ -76,6 +87,8 @@ class FusionRenderer:
         self.width = width
         self.height = height
         self.native = _core.Renderer(width, height, up_axis)
+        self.native.shadow_resolution = shadow_resolution
+        self.native.workers = workers
 
     # -- configuration -------------------------------------------------------
 
@@ -100,15 +113,46 @@ class FusionRenderer:
         return np.frombuffer(raw, np.uint8).reshape(self.height, self.width, 3).copy()
 
     def render_batch(self, batch, env_indices: Optional[Sequence[int]] = None) -> Dict[str, np.ndarray]:
-        """``{camera: (N, H, W, 3) uint8}`` for every env (or ``env_indices``) of a ``WorldBatch``."""
+        """``{camera: (N, H, W, 3) uint8}`` for every env (or ``env_indices``) of a ``WorldBatch``.
+
+        Every camera of every env is rendered in one GPU batch: scene geometry is
+        built on all CPU cores in parallel, all frames are queued back to back on
+        the GPU, and the CPU waits once.
+        """
         ids = None if env_indices is None else [int(i) for i in env_indices]
         n = len(batch) if ids is None else len(ids)
-        out = {}
-        for name, c in self.cameras.items():
-            raw = self.native.render_batch(batch, c.eye, c.target, c.fov_deg, ids)
-            # Copied: frombuffer views are read-only, and callers (autoreset) write into obs.
-            out[name] = np.frombuffer(raw, np.uint8).reshape(n, self.height, self.width, 3).copy()
-        return out
+        names = list(self.cameras)
+        cams = [(c.eye, c.target, c.fov_deg) for c in self.cameras.values()]
+        raw = self.native.render_cameras(batch, cams, ids)
+        # Copied: frombuffer views are read-only, and callers (autoreset) write into obs.
+        frames = np.frombuffer(raw, np.uint8).reshape(len(names), n, self.height, self.width, 3).copy()
+        return {name: frames[i] for i, name in enumerate(names)}
+
+    @property
+    def workers(self) -> int:
+        """Renderer instances a batch is split across (each with its own GPU queue)."""
+        return self.native.workers
+
+    @workers.setter
+    def workers(self, n: int) -> None:
+        self.native.workers = n
+
+    @property
+    def shadow_resolution(self) -> int:
+        return self.native.shadow_resolution
+
+    @shadow_resolution.setter
+    def shadow_resolution(self, texels: int) -> None:
+        self.native.shadow_resolution = texels
+
+    @property
+    def threads(self) -> int:
+        """CPU threads used to build scene geometry (default: all cores)."""
+        return self.native.threads
+
+    @threads.setter
+    def threads(self, n: int) -> None:
+        self.native.threads = n
 
     # -- adapter.Renderer protocol (unused by FusionEnv, which calls render_batch) --
 

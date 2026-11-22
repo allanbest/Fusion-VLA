@@ -96,3 +96,30 @@ def test_autoreset_rerenders_reset_envs_only_and_correctly():
     assert info["ended"].tolist() == [1]
     assert np.array_equal(obs["image/front"][1], first[1])      # fresh episode = start frame
     assert not np.array_equal(obs["image/front"][0], first[0])  # env 0 kept moving
+
+
+def test_batched_matches_single_frames_and_workers_are_deterministic():
+    env, r = make_env(5)
+    env.reset()
+    env.step(np.array([[-0.5, 0.8]] * 5))
+    for i in range(5):
+        env.step(np.array([[-0.5 + 0.1 * i, 0.8]] * 5))
+    batched = r.render_batch(env.batch)
+    for i in range(5):
+        single = r.render_world(env.world(i), "front")
+        assert np.array_equal(batched["front"][i], single)
+    for w in (1, 3):
+        r.workers = w
+        again = r.render_batch(env.batch)
+        assert all(np.array_equal(again[k], batched[k]) for k in batched)
+    sub = r.render_batch(env.batch, env_indices=[4, 1])
+    assert np.array_equal(sub["top"][0], batched["top"][4]) and np.array_equal(sub["top"][1], batched["top"][1])
+
+
+def test_tuning_knobs():
+    _, r = make_env(1)
+    assert r.workers == 2 and r.shadow_resolution == 1024
+    r.shadow_resolution = 512
+    assert r.shadow_resolution == 512
+    with pytest.raises(ValueError):
+        r.workers = 0
