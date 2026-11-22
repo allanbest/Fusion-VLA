@@ -1,0 +1,14 @@
+[package]
+name = "core-numerics"
+description = "Layer 2 of the Fusion core: block-sparse matrices, conjugate gradients, Newton's method with line search, small dense eigensolvers, forward-mode differentiation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+core-math.workspace = true
+core-runtime.workspace = true
+
+[dev-dependencies]
+core-world.workspace = true

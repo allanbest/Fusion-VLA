@@ -1,0 +1,13 @@
+[package]
+name = "phys-thermal"
+description = "Layer 5 of the Fusion core: transient and steady-state tetrahedral heat conduction with convection, radiation and thermo-mechanical coupling."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+core-math.workspace = true
+core-runtime.workspace = true
+core-numerics.workspace = true
+core-world.workspace = true

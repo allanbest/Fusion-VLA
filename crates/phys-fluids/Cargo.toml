@@ -1,0 +1,13 @@
+[package]
+name = "phys-fluids"
+description = "Layer 5c of the Fusion core: deterministic f64 weakly-compressible SPH fluid solver with two-way fluid-structure interaction."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+core-math.workspace = true
+core-runtime.workspace = true
+core-space.workspace = true
+core-world.workspace = true

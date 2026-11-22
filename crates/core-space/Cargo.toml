@@ -1,0 +1,10 @@
+[package]
+name = "core-space"
+description = "Layer 3 of the Fusion core: bounds, shapes and signed distances, bounding-volume hierarchies, neighbour search."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+core-math.workspace = true

@@ -1,0 +1,11 @@
+/target/
+*.so
+*.pyd
+*.dylib
+__pycache__/
+*.egg-info/
+.venv/
+dist/
+wheels/
+*.npz
+.pytest_cache/

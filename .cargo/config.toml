@@ -1,0 +1,6 @@
+# Lets plain `cargo build/test --workspace` link the Python extension on
+# macOS (maturin passes these itself). See the pyo3 FAQ.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]

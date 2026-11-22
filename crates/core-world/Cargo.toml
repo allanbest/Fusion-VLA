@@ -1,0 +1,11 @@
+[package]
+name = "core-world"
+description = "Layer 4 of the Fusion core: the scene as data — materials, objects and their representations, state, links."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+core-math.workspace = true
+core-space.workspace = true

@@ -1,0 +1,25 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "fusion-vla"
+version = "0.1.0"
+description = "Fusion Core physics solver with a thin, batched Python interface for VLA / robot-learning training."
+requires-python = ">=3.9"
+license = { text = "MIT OR Apache-2.0" }
+dependencies = ["numpy>=1.22"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[tool.maturin]
+manifest-path = "crates/fusion-core-py/Cargo.toml"
+python-source = "python"
+module-name = "fusion_vla._core"
+features = ["pyo3/extension-module"]

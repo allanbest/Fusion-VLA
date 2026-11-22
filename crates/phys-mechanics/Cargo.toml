@@ -1,0 +1,17 @@
+[package]
+name = "phys-mechanics"
+description = "Layer 5 of the Fusion core: mechanics as an incremental potential — finite-element solids, rigid bodies, gravity, anchors, barrier contact and friction, solved together by Newton's method."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+core-math.workspace = true
+core-runtime.workspace = true
+core-numerics.workspace = true
+core-space.workspace = true
+core-world.workspace = true
+
+[dev-dependencies]
+phys-thermal.workspace = true

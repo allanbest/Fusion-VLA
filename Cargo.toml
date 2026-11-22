@@ -1,0 +1,57 @@
+# Fusion-VLA: the Fusion Core solver, extracted standalone, plus Python
+# bindings for robot-learning / VLA training.
+#
+#   crates/
+#     fusion-core-py    Python extension `fusion_vla._core` (pyo3)
+#     phys-mechanics    L5 rigid + finite-element mechanics, one implicit solve
+#     phys-thermal      FEM heat conduction (dev-dependency of mechanics tests)
+#     phys-fluids       WCSPH fluids / two-way FSI
+#     core-world        L4 materials, objects, representations, URDF/MJCF
+#     core-space        L3 shapes, signed distances, BVHs, neighbour search
+#     core-numerics     L2 sparse blocks, CG, Newton, dense eigen, AD
+#     core-runtime      L1 deterministic worker pool, profiling
+#     core-math         L0 f64 vectors, matrices, rotations, RNG
+#
+# Everything except fusion-core-py is std-only: zero third-party crates.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/core-math",
+    "crates/core-runtime",
+    "crates/core-numerics",
+    "crates/core-space",
+    "crates/core-world",
+    "crates/phys-mechanics",
+    "crates/phys-thermal",
+    "crates/phys-fluids",
+    "crates/fusion-core-py",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/allanbest/Fusion-VLA"
+
+[workspace.dependencies]
+core-math      = { path = "crates/core-math", version = "0.1.0" }
+core-runtime   = { path = "crates/core-runtime", version = "0.1.0" }
+core-numerics  = { path = "crates/core-numerics", version = "0.1.0" }
+core-space     = { path = "crates/core-space", version = "0.1.0" }
+core-world     = { path = "crates/core-world", version = "0.1.0" }
+phys-mechanics = { path = "crates/phys-mechanics", version = "0.1.0" }
+phys-thermal   = { path = "crates/phys-thermal", version = "0.1.0" }
+phys-fluids    = { path = "crates/phys-fluids", version = "0.1.0" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+# The solver is unusable at opt-level 0; debug builds still need it to run.
+[profile.dev.package."*"]
+opt-level = 2
+[profile.dev]
+opt-level = 1

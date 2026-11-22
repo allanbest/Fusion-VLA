@@ -1,0 +1,9 @@
+[package]
+name = "core-runtime"
+description = "Layer 1 of the Fusion core: a persistent worker pool with deterministic splitting and reductions, and profiling."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]

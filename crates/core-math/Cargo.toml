@@ -1,0 +1,9 @@
+[package]
+name = "core-math"
+description = "Layer 0 of the Fusion core: f64 vectors, matrices, rotations, poses, physical constants, deterministic random numbers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
