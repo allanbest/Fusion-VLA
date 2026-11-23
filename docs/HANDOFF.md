@@ -137,6 +137,20 @@ env.reset()["image/front"]                           # (N, 224, 224, 3) uint8, t
   is bit-identical for any `workers` value.
 - **No GPU.** `fusion_vla.gpu_info()` returns `None`, and constructing a
   `FusionRenderer` raises `RuntimeError`. Physics still works.
+- **Threads.** An env and its renderer can be stepped from any Python thread,
+  for example a background rollout thread. Use each env from one thread at a
+  time. Physics and rendering release the GIL, so other threads keep running.
+- **Processes: use `spawn`, not `fork`.** GPU drivers don't survive
+  `fork()`. On macOS, Metal can't start in a forked process at all. A renderer
+  used or created in a forked child raises a `RuntimeError` saying so. Start
+  worker processes with `multiprocessing.get_context("spawn")` (or
+  `"forkserver"`), or `torch.utils.data.DataLoader(...,
+  multiprocessing_context="spawn")`, and build the env and renderer inside each
+  worker. Physics-only envs work in forked children.
+- **Errors.** GPU failures raise `RuntimeError`. A failed batch first rebuilds
+  the GPU devices and retries once, which covers a lost device or a driver
+  reset. Batches of any size work: big ones are read back in pieces of at most
+  `r.native.readback_limit` bytes (128 MiB by default).
 - **Not yet available.** Depth, segmentation, textures, and visual meshes from
   URDF/MJCF.
 

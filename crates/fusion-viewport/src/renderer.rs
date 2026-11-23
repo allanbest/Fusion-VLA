@@ -129,6 +129,9 @@ pub struct Renderer {
     shadow_view: wgpu::TextureView,
     /// Edge of the square shadow map, in texels.
     shadow_resolution: u32,
+    /// Largest readback buffer `read_back_many` allocates, in bytes. Bigger
+    /// batches are split into several readbacks. Capped by the device limit.
+    readback_limit: u64,
 
     depth_pipeline: wgpu::RenderPipeline,
     shadow_pipeline: wgpu::RenderPipeline,
@@ -598,6 +601,7 @@ impl Renderer {
             ao_blur_view,
             shadow_view,
             shadow_resolution: SHADOW_RESOLUTION,
+            readback_limit: 128 << 20,
             depth_pipeline,
             shadow_pipeline,
             triangle_pipeline,
@@ -652,6 +656,17 @@ impl Renderer {
 
     pub fn shadow_resolution(&self) -> u32 {
         self.shadow_resolution
+    }
+
+    /// Cap on one readback buffer in [`Renderer::read_back_many`], in bytes
+    /// (default 128 MiB, never more than the device allows). Batches that
+    /// need more are read back in several pieces.
+    pub fn set_readback_limit(&mut self, bytes: u64) {
+        self.readback_limit = bytes.max(1);
+    }
+
+    pub fn readback_limit(&self) -> u64 {
+        self.readback_limit
     }
 
     fn rebuild_bind_groups(&mut self) {
@@ -1304,11 +1319,52 @@ impl Renderer {
     /// of the finished target into its own slice of one shared readback buffer.
     /// Queue order keeps the frames apart: frame i's uniforms, vertices and copy
     /// are all scheduled before frame i + 1 overwrites them. The CPU waits once,
-    /// at the end.
+    /// at the end, or once per piece when the batch is bigger than
+    /// [`Renderer::set_readback_limit`] allows in one buffer. GPU validation
+    /// and out-of-memory errors come back as `Err` instead of panicking.
     ///
     /// Frames come back as tightly packed RGBA8, frame after frame, in the order
     /// given. Offscreen renderers only.
-    pub fn read_back_many(&mut self, frames: &[(&OrbitCamera, &Geometry)]) -> Option<Vec<u8>> {
+    pub fn read_back_many(
+        &mut self,
+        frames: &[(&OrbitCamera, &Geometry)],
+    ) -> Result<Vec<u8>, String> {
+        let Target::Offscreen { width, height, .. } = &self.target else {
+            return Err("read_back_many needs an offscreen renderer".into());
+        };
+        let (width, height) = (*width, *height);
+        let padded = (width * 4).div_ceil(256) * 256;
+        let frame_bytes = (padded * height) as u64;
+        // One readback buffer must fit the device's buffer limit, or wgpu
+        // rejects it. Big batches go in several pieces.
+        let cap = self
+            .readback_limit
+            .min(self.device.limits().max_buffer_size);
+        let per_piece = ((cap / frame_bytes) as usize).max(1);
+        let mut pixels = Vec::with_capacity((width * 4 * height) as usize * frames.len());
+        for piece in frames.chunks(per_piece) {
+            // Validation and out-of-memory errors land in these scopes
+            // instead of wgpu's default handler, which panics.
+            self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+            self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let result = self.read_back_piece(piece, &mut pixels);
+            let validation = pollster::block_on(self.device.pop_error_scope());
+            let oom = pollster::block_on(self.device.pop_error_scope());
+            if let Some(e) = validation.or(oom) {
+                return Err(format!("GPU error: {e}"));
+            }
+            result?;
+        }
+        Ok(pixels)
+    }
+
+    /// One piece of [`Renderer::read_back_many`]: submit every frame, then
+    /// wait once and append the unpadded RGBA rows to `pixels`.
+    fn read_back_piece(
+        &mut self,
+        frames: &[(&OrbitCamera, &Geometry)],
+        pixels: &mut Vec<u8>,
+    ) -> Result<(), String> {
         let Target::Offscreen {
             texture,
             width,
@@ -1316,12 +1372,12 @@ impl Renderer {
             ..
         } = &self.target
         else {
-            return None;
+            return Err("read_back_many needs an offscreen renderer".into());
         };
         let (width, height) = (*width, *height);
         let texture = texture.clone();
         if frames.is_empty() {
-            return Some(Vec::new());
+            return Ok(());
         }
         let unpadded = width * 4;
         let padded = unpadded.div_ceil(256) * 256;
@@ -1368,14 +1424,18 @@ impl Renderer {
         slice.map_async(wgpu::MapMode::Read, move |r| {
             let _ = sender.send(r);
         });
-        let _ = self.device.poll(wgpu::PollType::Wait {
-            submission_index: None,
-            timeout: None,
-        });
-        receiver.recv().ok()?.ok()?;
+        self.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .map_err(|e| format!("GPU wait failed: {e}"))?;
+        receiver
+            .recv()
+            .map_err(|_| "GPU readback was dropped".to_string())?
+            .map_err(|e| format!("GPU readback failed: {e}"))?;
 
         let data = slice.get_mapped_range();
-        let mut pixels = Vec::with_capacity((unpadded * height) as usize * frames.len());
         for f in 0..frames.len() {
             let base = f * frame_bytes as usize;
             for row in 0..height {
@@ -1385,7 +1445,7 @@ impl Renderer {
         }
         drop(data);
         buffer.unmap();
-        Some(pixels)
+        Ok(())
     }
 }
 

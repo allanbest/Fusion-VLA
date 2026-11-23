@@ -148,6 +148,16 @@ On a discrete GPU, try more workers. A lower shadow resolution is faster.
   neighbour-grid kernel for the Standard engine's fluids. They're included and
   built, but nothing in the training path uses them.
 
+## Threads, processes and errors
+
+- Envs and renderers work from any Python thread. Physics and rendering
+  release the GIL.
+- For worker processes, use `spawn` or `forkserver`, not `fork`. GPU drivers
+  don't survive `fork()`, and on macOS Metal can't start in a forked process.
+  A renderer in a forked child raises a `RuntimeError` instead of crashing.
+- Renderer failures raise `RuntimeError`, never a Rust panic. A failed batch
+  rebuilds the GPU devices and retries once first.
+
 ## Limits
 
 - **Primitive collision shapes only:** spheres, boxes, capsules and
@@ -174,7 +184,8 @@ Added since:
 - `World.object_ids`, `object_name`, `object_kind` and `object_shape`
 - `WorldBatch.object_poses`
 - `render.rs`: `Renderer` and `gpu_info`
-- In `fusion-viewport`: `Renderer::read_back_many` (many frames, one sync) and
-  `Renderer::set_shadow_resolution`
+- In `fusion-viewport`: `Renderer::read_back_many` (many frames, one sync,
+  split to fit the device's buffer limit, GPU errors returned as `Err`),
+  `Renderer::set_shadow_resolution` and `Renderer::set_readback_limit`
 
 License: MIT OR Apache-2.0, as declared by the source crates.

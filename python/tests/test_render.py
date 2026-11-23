@@ -123,3 +123,80 @@ def test_tuning_knobs():
     assert r.shadow_resolution == 512
     with pytest.raises(ValueError):
         r.workers = 0
+
+
+# -- reliability ---------------------------------------------------------------
+
+
+def test_render_from_another_thread():
+    # Training loops often step envs on a background thread. The renderer used
+    # to be bound to the thread that created it and panicked anywhere else.
+    import threading
+
+    env, _ = make_env(2)
+    env.reset()
+    out, errors = [], []
+
+    def worker():
+        try:
+            out.append(env.step(np.zeros((2, 2)))[0]["image/front"])
+        except BaseException as e:  # noqa: BLE001 - a PanicException is a BaseException
+            errors.append(e)
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join()
+    assert not errors, errors
+    assert out[0].shape == (2, 64, 96, 3)
+
+
+def test_big_batches_split_into_several_readbacks():
+    # One readback buffer per batch used to overflow the GPU's buffer limit at
+    # around 1,200 envs x 2 cameras and panic. A tiny limit forces one frame
+    # per readback; the images must not change.
+    env, r = make_env(5)
+    whole = env.reset()
+    r.native.readback_limit = 1
+    assert r.native.readback_limit == 1
+    pieces = env.observe()
+    for cam in CAMS:
+        assert np.array_equal(whole[f"image/{cam}"], pieces[f"image/{cam}"])
+
+
+def _use_inherited_renderer(renderer, world, conn):
+    try:
+        renderer.render_world(world, "front")
+        conn.send("rendered")
+    except RuntimeError as e:
+        conn.send(f"RuntimeError: {e}")
+    except BaseException as e:  # noqa: BLE001
+        conn.send(f"{type(e).__name__}: {e}")
+
+
+def _new_renderer_in_child(conn):
+    try:
+        FusionRenderer(CAMS, 32, 32)
+        conn.send("rendered")
+    except RuntimeError as e:
+        conn.send(f"RuntimeError: {e}")
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="no fork()")
+def test_fork_raises_instead_of_crashing():
+    # GPU devices don't survive fork(). A forked child used to segfault; now
+    # it gets a RuntimeError that says to use 'spawn', both when it reuses the
+    # parent's renderer and when it makes its own (the parent had already
+    # started the GPU, and on macOS Metal can't start after fork() at all).
+    import multiprocessing as mp
+
+    ctx = mp.get_context("fork")
+    env, r = make_env(1)
+    env.reset()
+    for target, args in ((_use_inherited_renderer, (r, env.world(0))), (_new_renderer_in_child, ())):
+        parent, child = ctx.Pipe()
+        p = ctx.Process(target=target, args=(*args, child))
+        p.start()
+        msg = parent.recv() if parent.poll(60) else "no answer"
+        p.join(60)
+        assert p.exitcode == 0, f"child crashed with exit code {p.exitcode}"
+        assert msg.startswith("RuntimeError") and "spawn" in msg, msg

@@ -10,8 +10,11 @@
 //! with smooth normals. Half-spaces become a checkered floor tile. FEM solids
 //! are drawn from their surface triangles at the current node positions.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::f32::consts::PI;
+use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use core_math::{Quat as CQuat, Vec3 as CVec3};
 use core_space::Shape as CShape;
@@ -108,7 +111,70 @@ struct Style {
     floor_tile: f32,
 }
 
-#[pyclass(module = "fusion_vla.core", name = "Renderer", unsendable)]
+// ---------------------------------------------------------------- fork safety
+//
+// GPU drivers don't survive fork(). A child that inherits a parent's device
+// crashes on first use, and on macOS Metal can't start at all in a forked
+// child, even when the parent never touched the GPU (an objc abort or a
+// segfault). These flags turn both cases into a Python `RuntimeError`.
+
+/// Set in a child process right after fork().
+static FORKED_CHILD: AtomicBool = AtomicBool::new(false);
+/// This process, or its parent before a fork, has started wgpu.
+static GPU_STARTED: AtomicBool = AtomicBool::new(false);
+/// The parent had started wgpu before forking this process.
+static GPU_INHERITED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn after_fork_in_child() {
+    // Async-signal-safe: atomics only.
+    FORKED_CHILD.store(true, Ordering::SeqCst);
+    if GPU_STARTED.load(Ordering::SeqCst) {
+        GPU_INHERITED.store(true, Ordering::SeqCst);
+    }
+}
+
+#[cfg(unix)]
+extern "C" {
+    fn pthread_atfork(
+        prepare: Option<extern "C" fn()>,
+        parent: Option<extern "C" fn()>,
+        child: Option<extern "C" fn()>,
+    ) -> std::os::raw::c_int;
+}
+
+const USE_SPAWN: &str = "Start worker processes with multiprocessing's 'spawn' or 'forkserver' \
+     method instead (multiprocessing.get_context('spawn'), or \
+     torch DataLoader(..., multiprocessing_context='spawn')), or render in the main process.";
+
+/// Refuses to start the GPU where the driver would crash.
+fn fork_guard() -> PyResult<()> {
+    if cfg!(target_os = "macos") && FORKED_CHILD.load(Ordering::SeqCst) {
+        return Err(PyRuntimeError::new_err(format!(
+            "GPU rendering can't start in a process created with fork() on macOS \
+             (Metal doesn't support it and crashes). {USE_SPAWN}"
+        )));
+    }
+    if GPU_INHERITED.load(Ordering::SeqCst) {
+        return Err(PyRuntimeError::new_err(format!(
+            "this process was fork()ed after its parent had started the GPU, and GPU \
+             driver state doesn't survive fork(). {USE_SPAWN}"
+        )));
+    }
+    GPU_STARTED.store(true, Ordering::SeqCst);
+    Ok(())
+}
+
+fn panic_message(payload: &(dyn Any + Send)) -> String {
+    let text = payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic".into());
+    format!("internal renderer error: {}", text.trim())
+}
+
+#[pyclass(module = "fusion_vla.core", name = "Renderer")]
 pub struct PyRenderer {
     /// `renderers[0]` serves single frames; batches are split across all of
     /// them, each on its own thread with its own GPU device and queue.
@@ -118,6 +184,20 @@ pub struct PyRenderer {
     up_axis: char,
     style: Style,
     threads: usize,
+    /// The process that created the GPU devices; they're unusable in any other.
+    pid: u32,
+}
+
+impl Drop for PyRenderer {
+    fn drop(&mut self) {
+        if std::process::id() != self.pid {
+            // Inherited through fork(): releasing the parent's GPU objects
+            // here would call into a driver that no longer exists.
+            for r in self.renderers.drain(..) {
+                std::mem::forget(r);
+            }
+        }
+    }
 }
 
 impl Style {
@@ -206,10 +286,10 @@ impl Style {
 }
 
 /// Builds one `Geometry` per world, spread over up to `threads` threads.
-fn build_geometries(style: &Style, worlds: &[&World], threads: usize) -> Vec<Geometry> {
+fn build_geometries(style: &Style, worlds: &[&World], threads: usize) -> Result<Vec<Geometry>, String> {
     let threads = threads.clamp(1, worlds.len().max(1));
     if threads == 1 {
-        return worlds.iter().map(|w| style.geometry(w)).collect();
+        return Ok(worlds.iter().map(|w| style.geometry(w)).collect());
     }
     let chunk = worlds.len().div_ceil(threads);
     std::thread::scope(|scope| {
@@ -217,11 +297,49 @@ fn build_geometries(style: &Style, worlds: &[&World], threads: usize) -> Vec<Geo
             .chunks(chunk)
             .map(|part| scope.spawn(move || part.iter().map(|w| style.geometry(w)).collect::<Vec<_>>()))
             .collect();
-        handles
-            .into_iter()
-            .flat_map(|h| h.join().expect("geometry thread panicked"))
-            .collect()
+        let mut out = Vec::with_capacity(worlds.len());
+        for h in handles {
+            out.extend(h.join().map_err(|p| panic_message(&*p))?);
+        }
+        Ok(out)
     })
+}
+
+/// Every (camera, world) frame, camera-major, as RGB. Runs without the GIL.
+fn render_frames(
+    renderers: &mut [Renderer],
+    style: &Style,
+    threads: usize,
+    worlds: &[&World],
+    cams: &[OrbitCamera],
+) -> Result<Vec<u8>, String> {
+    let geoms = build_geometries(style, worlds, threads)?;
+    let frames: Vec<(&OrbitCamera, &Geometry)> =
+        cams.iter().flat_map(|c| geoms.iter().map(move |g| (c, g))).collect();
+    let workers = renderers.len().min(frames.len()).max(1);
+    let chunk = frames.len().div_ceil(workers).max(1);
+    let parts: Vec<Result<Vec<u8>, String>> = if workers == 1 {
+        vec![renderers[0].read_back_many(&frames)]
+    } else {
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = renderers
+                .iter_mut()
+                .zip(frames.chunks(chunk))
+                .map(|(r, part)| scope.spawn(move || r.read_back_many(part)))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_else(|p| Err(panic_message(&*p))))
+                .collect()
+        })
+    };
+    let mut rgba = Vec::new();
+    for p in parts {
+        rgba.extend(p?);
+    }
+    let mut out = Vec::with_capacity(rgba.len() / 4 * 3);
+    rgba_to_rgb(&rgba, &mut out);
+    Ok(out)
 }
 
 impl PyRenderer {
@@ -243,42 +361,58 @@ impl PyRenderer {
         Ok(cam)
     }
 
-    fn render_rgb(&mut self, world: &World, cam: &OrbitCamera, out: &mut Vec<u8>) -> PyResult<()> {
-        let g = self.style.geometry(world);
-        let image = self.renderers[0]
-            .read_back(cam, &g)
-            .ok_or_else(|| PyRuntimeError::new_err("offscreen readback failed"))?;
-        rgba_to_rgb(&image.pixels, out);
+    /// Errors in any process other than the one that made the GPU devices.
+    fn check_process(&self) -> PyResult<()> {
+        if std::process::id() != self.pid {
+            return Err(PyRuntimeError::new_err(format!(
+                "this Renderer was created in another process and inherited through fork(); \
+                 GPU devices don't survive fork(). Create the renderer in this process. {USE_SPAWN}"
+            )));
+        }
         Ok(())
     }
 
-    /// Every (camera, world) frame in one GPU batch, camera-major.
-    fn render_many(&mut self, worlds: &[&World], cams: &[OrbitCamera]) -> PyResult<Vec<u8>> {
-        let geoms = build_geometries(&self.style, worlds, self.threads);
-        let frames: Vec<(&OrbitCamera, &Geometry)> =
-            cams.iter().flat_map(|c| geoms.iter().map(move |g| (c, g))).collect();
-        let workers = self.renderers.len().min(frames.len()).max(1);
-        let chunk = frames.len().div_ceil(workers).max(1);
-        let parts: Vec<Option<Vec<u8>>> = if workers == 1 {
-            vec![self.renderers[0].read_back_many(&frames)]
-        } else {
-            std::thread::scope(|scope| {
-                let handles: Vec<_> = self
-                    .renderers
-                    .iter_mut()
-                    .zip(frames.chunks(chunk))
-                    .map(|(r, part)| scope.spawn(move || r.read_back_many(part)))
-                    .collect();
-                handles.into_iter().map(|h| h.join().expect("render thread panicked")).collect()
-            })
-        };
-        let mut rgba = Vec::new();
-        for p in parts {
-            rgba.extend(p.ok_or_else(|| PyRuntimeError::new_err("offscreen readback failed"))?);
+    fn try_render(&mut self, py: Python<'_>, worlds: &[&World], cams: &[OrbitCamera]) -> Result<Vec<u8>, String> {
+        let (renderers, style, threads) = (&mut self.renderers, &self.style, self.threads);
+        py.allow_threads(|| {
+            catch_unwind(AssertUnwindSafe(|| render_frames(renderers, style, threads, worlds, cams)))
+                .unwrap_or_else(|p| Err(panic_message(&*p)))
+        })
+    }
+
+    /// Fresh GPU devices with the same settings, after a failure (a lost
+    /// device, a driver reset, or a batch that left a device in a bad state).
+    fn rebuild(&mut self) -> PyResult<()> {
+        let settings = self.renderers[0].settings;
+        let shadow = self.renderers[0].shadow_resolution();
+        let limit = self.renderers[0].readback_limit();
+        let mut fresh = Vec::with_capacity(self.renderers.len());
+        for _ in 0..self.renderers.len() {
+            let mut r = new_offscreen(self.width, self.height)?;
+            r.settings = settings;
+            r.set_shadow_resolution(shadow);
+            r.set_readback_limit(limit);
+            fresh.push(r);
         }
-        let mut out = Vec::with_capacity(rgba.len() / 4 * 3);
-        rgba_to_rgb(&rgba, &mut out);
-        Ok(out)
+        self.renderers = fresh;
+        Ok(())
+    }
+
+    /// Every (camera, world) frame in one GPU batch, camera-major, as RGB.
+    /// On failure the GPU devices are rebuilt and the batch is tried once
+    /// more; a second failure raises `RuntimeError`.
+    fn render_many(&mut self, py: Python<'_>, worlds: &[&World], cams: &[OrbitCamera]) -> PyResult<Vec<u8>> {
+        self.check_process()?;
+        let first = match self.try_render(py, worlds, cams) {
+            Ok(out) => return Ok(out),
+            Err(e) => e,
+        };
+        self.rebuild().map_err(|e| {
+            PyRuntimeError::new_err(format!("GPU rendering failed ({first}), and so did restarting the GPU: {e}"))
+        })?;
+        self.try_render(py, worlds, cams).map_err(|again| {
+            PyRuntimeError::new_err(format!("GPU rendering failed twice: {first}; after restarting the GPU: {again}"))
+        })
     }
 }
 
@@ -290,7 +424,10 @@ fn rgba_to_rgb(rgba: &[u8], out: &mut Vec<u8>) {
 }
 
 fn new_offscreen(width: u32, height: u32) -> PyResult<Renderer> {
-    Renderer::try_offscreen(width, height).ok_or_else(|| {
+    fork_guard()?;
+    catch_unwind(|| Renderer::try_offscreen(width, height))
+        .map_err(|p| PyRuntimeError::new_err(panic_message(&*p)))?
+        .ok_or_else(|| {
         PyRuntimeError::new_err(
             "no usable GPU adapter for offscreen rendering (wgpu found none: \
              on Linux install Vulkan drivers, e.g. the NVIDIA driver or mesa-vulkan-drivers)",
@@ -333,6 +470,7 @@ impl PyRenderer {
                 floor_tile: 0.25,
             },
             threads,
+            pid: std::process::id(),
         })
     }
 
@@ -421,8 +559,7 @@ impl PyRenderer {
         fov_deg: f64,
     ) -> PyResult<Bound<'py, PyBytes>> {
         let cam = self.camera(eye, target, fov_deg)?;
-        let mut out = Vec::new();
-        self.render_rgb(&world.inner, &cam, &mut out)?;
+        let out = self.render_many(py, &[&world.inner], &[cam])?;
         Ok(PyBytes::new(py, &out))
     }
 
@@ -464,7 +601,7 @@ impl PyRenderer {
             return Err(PyIndexError::new_err(format!("env index {bad} out of range ({n})")));
         }
         let worlds: Vec<&World> = ids.iter().map(|&i| batch.inner.world(i)).collect();
-        let out = self.render_many(&worlds, &cams)?;
+        let out = self.render_many(py, &worlds, &cams)?;
         Ok(PyBytes::new(py, &out))
     }
 
@@ -481,11 +618,13 @@ impl PyRenderer {
         if !(1..=64).contains(&n) {
             return Err(PyValueError::new_err("workers must be in 1..=64"));
         }
+        self.check_process()?;
         self.renderers.truncate(n);
         while self.renderers.len() < n {
             let mut r = new_offscreen(self.width, self.height)?;
-            r.settings = self.renderers[0].settings.clone();
+            r.settings = self.renderers[0].settings;
             r.set_shadow_resolution(self.renderers[0].shadow_resolution());
+            r.set_readback_limit(self.renderers[0].readback_limit());
             self.renderers.push(r);
         }
         Ok(())
@@ -499,10 +638,29 @@ impl PyRenderer {
         self.renderers[0].shadow_resolution()
     }
     #[setter]
-    fn set_shadow_resolution(&mut self, texels: u32) {
+    fn set_shadow_resolution(&mut self, texels: u32) -> PyResult<()> {
+        self.check_process()?;
         for r in &mut self.renderers {
             r.set_shadow_resolution(texels);
         }
+        Ok(())
+    }
+
+    /// Largest GPU readback buffer, in bytes (default 128 MiB, capped by the
+    /// device). Bigger batches are read back in several pieces.
+    #[getter]
+    fn readback_limit(&self) -> u64 {
+        self.renderers[0].readback_limit()
+    }
+    #[setter]
+    fn set_readback_limit(&mut self, bytes: u64) -> PyResult<()> {
+        if bytes == 0 {
+            return Err(PyValueError::new_err("readback_limit must be >= 1"));
+        }
+        for r in &mut self.renderers {
+            r.set_readback_limit(bytes);
+        }
+        Ok(())
     }
 
     /// CPU threads used to build scene geometry (default: all cores).
@@ -524,6 +682,7 @@ impl PyRenderer {
 /// "driver", "driver_info"}`, or `None` when there is no usable adapter.
 #[pyfunction]
 pub fn gpu_info(py: Python<'_>) -> PyResult<Option<Bound<'_, PyDict>>> {
+    fork_guard()?;
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         power_preference: wgpu::PowerPreference::HighPerformance,
@@ -544,6 +703,11 @@ pub fn gpu_info(py: Python<'_>) -> PyResult<Option<Bound<'_, PyDict>>> {
 }
 
 pub(crate) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    #[cfg(unix)]
+    // SAFETY: registers a handler that only stores to atomics.
+    unsafe {
+        pthread_atfork(None, None, Some(after_fork_in_child));
+    }
     module.add_class::<PyRenderer>()?;
     module.add_function(wrap_pyfunction!(gpu_info, module)?)?;
     Ok(())
